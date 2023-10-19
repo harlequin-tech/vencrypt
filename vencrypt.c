@@ -8,7 +8,7 @@
 #define VE_MAJOR 182
 #define VE_MAX_DEVICES 2
 #define VE_MINOR_PT 0 // plaintext node
-#define VE_MINOR_CT 1 // encrypted text node
+#define VE_MINOR_CT 1 // ciphertext node
 
 typedef struct {
 	struct cdev cdev;
@@ -17,6 +17,14 @@ typedef struct {
 
 static struct class *vencrypt_class;
 static dev_t device_number;
+
+static bool encrypt=true;
+module_param(encrypt,bool,0660);
+MODULE_PARM_DESC(myshort, "1=encrypt, 0=decrypt");
+
+static char *key="(no key)";
+module_param(key,charp,0660);
+MODULE_PARM_DESC(key, "AES encryption key");
 
 // device nodes
 static struct {
@@ -79,7 +87,7 @@ int vencrypt_init(void)
 	int ind, retval, major;
 	dev_t dev;
 
-	printk("VENCRYPT: %s\n", __func__);
+	printk("VENCRYPT: %s encrypt=%u key=%s\n", __func__, encrypt, key);
 	retval = alloc_chrdev_region(&device_number, 0, VE_MAX_DEVICES,
 				     "vencrypt");
 	if (retval) {
