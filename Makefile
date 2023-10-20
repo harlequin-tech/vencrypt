@@ -1,4 +1,6 @@
 obj-m += vencrypt.o
+
+vencrypt-objs+= vencrypt_main.o aes/aes.o
  
 KDIR = /lib/modules/$(shell uname -r)/build
  
