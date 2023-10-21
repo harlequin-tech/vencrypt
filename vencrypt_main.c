@@ -49,10 +49,11 @@ typedef struct vencrypt_device_data {
 	size_t input_processed;
 	struct vencrypt_device_data *pt;
 	struct vencrypt_device_data *ct;
+
+    struct mutex mutex;        // protection for open
+    bool in_use;               // protection for open
 } vencrypt_device_data_t;
 
-static struct mutex vencrypt_mutex;
-static bool vencrypt_in_use;
 
 static struct class *vencrypt_class;
 static dev_t device_number;
@@ -79,14 +80,14 @@ static int vencrypt_open(struct inode *inode, struct file *fp)
 	vencrypt_device_data_t *vencrypt_data =
 		container_of(inode->i_cdev, struct vencrypt_device_data, cdev);
 
-    mutex_lock(&vencrypt_mutex);
-    if (vencrypt_in_use) {
-        mutex_unlock(&vencrypt_mutex);
+    mutex_lock(&vencrypt_data->mutex);
+    if (vencrypt_data->in_use) {
+        mutex_unlock(&vencrypt_data->mutex);
         // driver is already open
         return -EBUSY;
     }
-    vencrypt_in_use = true;
-    mutex_unlock(&vencrypt_mutex);
+    vencrypt_data->in_use = true;
+    mutex_unlock(&vencrypt_data->mutex);
 
 	fp->private_data = vencrypt_data;
 
@@ -457,9 +458,9 @@ static int vencrypt_release(struct inode *node, struct file *fp)
 	}
 
     // done with driver
-    mutex_lock(&vencrypt_mutex);
-    vencrypt_in_use = false;
-    mutex_unlock(&vencrypt_mutex);
+    mutex_lock(&vencrypt_data->mutex);
+    vencrypt_data->in_use = false;
+    mutex_unlock(&vencrypt_data->mutex);
 
 	return 0;
 }
@@ -519,8 +520,6 @@ int vencrypt_init(void)
 	unsigned char aes_key[VE_MAX_KEY_SIZE];
 	size_t aes_key_size;
 
-    mutex_init(&vencrypt_mutex);
-
 	// set up cipher for CT node
 	if (encrypt) {
 		minor = nodes[VE_MINOR_PT]
@@ -576,9 +575,11 @@ int vencrypt_init(void)
 
 		// include AES key for encrypt / decrypt
 		memcpy(devs[nodes[ind].minor].key, aes_key, aes_key_size);
-	}
+        mutex_init(&devs[nodes[ind].minor].mutex);
+        devs[nodes[ind].minor].in_use = false;    // ready for open
 
-    vencrypt_in_use = false;    // ready for open
+
+	}
 
 	return retval;
 }
@@ -593,11 +594,11 @@ void vencrypt_exit(void)
 		/* release devs[ind] fields */
 		cdev_del(&devs[nodes[ind].minor].cdev);
 		device_destroy(vencrypt_class, dev);
+        mutex_destroy(&devs[nodes[ind].minor].mutex);
 	}
 	class_destroy(vencrypt_class);
 	unregister_chrdev_region(device_number, VE_MAX_DEVICES);
 
-    mutex_destroy(&vencrypt_mutex);
 }
 
 module_init(vencrypt_init);
