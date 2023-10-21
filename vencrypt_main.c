@@ -103,7 +103,8 @@ static size_t get_padding(size_t size, size_t block_size)
  * perform cipher operation (encrypt or decrypt)
  */
 static ssize_t do_crypt(vencrypt_device_data_t *vencrypt_data, bool encrypt,
-			const unsigned char *input_data, size_t input_size,
+			const unsigned char *input_data,
+			const unsigned char *local_data, size_t input_size,
 			size_t input_offset)
 {
 	size_t output_size;
@@ -112,15 +113,20 @@ static ssize_t do_crypt(vencrypt_device_data_t *vencrypt_data, bool encrypt,
 	if (encrypt) {
 		size_t remainder = 0;
 		vencrypt_data_list_t *entry = NULL;
+		unsigned long res;
 
 		if ((vencrypt_data->remainder_size + input_size) <
 		    VE_BLOCK_SIZE) {
-			// not enough data to encrypt
-			printk("VENCRYPT: %s.%d not enough data to encrypt\n",
-			       __func__, __LINE__);
-			copy_from_user(&vencrypt_data->remainder
-						[vencrypt_data->remainder_size],
-				       input_data + input_offset, input_size);
+			// not enough data to encrypt, save it
+			if ((res = copy_from_user(
+				     &vencrypt_data->remainder
+					      [vencrypt_data->remainder_size],
+				     input_data + input_offset, input_size)) !=
+			    0) {
+				pr_info("VECRYPT: %s.%d failed to copy from user res=%lu\n",
+					__func__, __LINE__, res);
+				return -ENOSPC;
+			}
 			vencrypt_data->remainder_size += input_size;
 			return input_size;
 		}
@@ -135,11 +141,33 @@ static ssize_t do_crypt(vencrypt_device_data_t *vencrypt_data, bool encrypt,
 		if (vencrypt_data->remainder_size) {
 			memcpy(buf, vencrypt_data->remainder,
 			       vencrypt_data->remainder_size);
-			copy_from_user(buf + vencrypt_data->remainder_size,
-				       input_data + input_offset, input_size);
+			if (local_data) {
+				memcpy(buf + vencrypt_data->remainder_size,
+				       local_data, input_size);
+			} else {
+				if ((res = copy_from_user(
+					     buf + vencrypt_data->remainder_size,
+					     input_data + input_offset,
+					     input_size)) != 0) {
+					pr_info("VECRYPT: %s.%d failed to copy from user res=%lu\n",
+						__func__, __LINE__, res);
+					return -ENOSPC;
+				}
+			}
 		} else {
-			copy_from_user(buf, input_data + input_offset,
-				       input_size);
+			if (local_data) {
+				memcpy(buf, local_data, input_size);
+			} else {
+				if ((res = copy_from_user(
+					     buf, input_data + input_offset,
+					     input_size)) != 0) {
+					pr_info("VECRYPT: %s.%d failed to copy from user res=%lu,"
+						"input offset = %lu \n",
+						__func__, __LINE__, res,
+						input_offset);
+					return -ENOSPC;
+				}
+			}
 		}
 
 		if (((input_size + vencrypt_data->remainder_size) %
@@ -187,7 +215,17 @@ static ssize_t do_crypt(vencrypt_device_data_t *vencrypt_data, bool encrypt,
 			return -ENOMEM;
 		}
 
-		copy_from_user(buf, input_data + input_offset, input_size);
+		if (local_data == NULL) {
+			if (copy_from_user(buf, input_data + input_offset,
+					   input_size) != 0) {
+				pr_info("VECRYPT: %s.%d failed to copy from user\n",
+					__func__, __LINE__);
+				return -ENOSPC;
+			}
+		} else {
+			// not from user buffer
+			memcpy(buf, local_data + input_offset, input_size);
+		}
 		AES_CBC_decrypt_buffer(&vencrypt_data->ctx, buf, input_size);
 
 		output_size = input_size;
@@ -238,8 +276,6 @@ static ssize_t vencrypt_read(struct file *fp, char __user *user_buffer,
 		}
 	}
 
-	printk("VENCRYPT: %s.%d\n", __func__, __LINE__);
-	//entry = list_entry(&vencrypt_data->output_list.list, struct vencrypt_data_list, list);
 	entry = list_first_entry(&vencrypt_data->output_list.list,
 				 struct vencrypt_data_list, list);
 	while (entry != NULL && (to_copy > 0)) {
@@ -274,26 +310,14 @@ static ssize_t vencrypt_read(struct file *fp, char __user *user_buffer,
                     padding = 16;
                 }
 #endif
-				printk("VENCRYPT: %s.%d padding is %d\n",
-				       __func__, __LINE__, padding);
 				entry->data_size -= padding;
 				if (entry->data_size == 0) {
 					// nothing left
-					printk("VENCRYPT: %s.%d no data after padding removed\n",
-					       __func__, __LINE__);
 					vfree(entry->data);
-					printk("VENCRYPT: %s.%d\n", __func__,
-					       __LINE__);
 					list_del(&entry->list);
-					printk("VENCRYPT: %s.%d\n", __func__,
-					       __LINE__);
 					vfree(entry);
 					copy_size = 0;
-					break;
-				} else {
-					printk("VENCRYPT: %s.%d %lu bytes left after padding\n",
-					       __func__, __LINE__,
-					       entry->data_size);
+					break;  // done
 				}
 			}
 		}
@@ -307,32 +331,32 @@ static ssize_t vencrypt_read(struct file *fp, char __user *user_buffer,
 		}
 		if (entry->data_size <= to_copy) {
 			// want all of it
-			printk("VENCRYPT: %s.%d\n", __func__, __LINE__);
-			copy_to_user(user_buffer + off,
-				     entry->data + entry->data_offset,
-				     entry->data_size);
+			if (copy_to_user(user_buffer + off,
+					 entry->data + entry->data_offset,
+					 entry->data_size) != 0) {
+				pr_info("VECRYPT: %s.%d failed to copy to user\n",
+					__func__, __LINE__);
+				return -ENOSPC;
+			}
 			to_copy -= entry->data_size;
 			off += entry->data_size;
-			printk("VENCRYPT: %s.%d to_copy = %lu - data_size %lu\n",
-			       __func__, __LINE__, to_copy, entry->data_size);
 			vfree(entry->data);
 			next = list_next_entry(entry, list);
 			list_del(&entry->list);
 			// only free if not the head entry
 			if (next != NULL) {
-				printk("VENCRYPT: %s.%d\n", __func__, __LINE__);
-				//vfree(entry); // XXX todo
+				vfree(entry);
 			}
 			entry = next;
-			printk("VENCRYPT: %s.%d entry = %p\n", __func__,
-			       __LINE__, entry);
-
 		} else {
 			// partial copy
-			printk("VENCRYPT: %s.%d partial copy\n", __func__,
-			       __LINE__);
-			copy_to_user(user_buffer + off,
-				     entry->data + entry->data_offset, to_copy);
+			if (copy_to_user(user_buffer + off,
+					 entry->data + entry->data_offset,
+					 to_copy) != 0) {
+				pr_info("VECRYPT: %s.%d failed to copy to user\n",
+					__func__, __LINE__);
+				return -ENOSPC;
+			}
 			entry->data_offset += to_copy;
 			entry->data_size -= to_copy;
 			to_copy = 0;
@@ -343,9 +367,6 @@ static ssize_t vencrypt_read(struct file *fp, char __user *user_buffer,
 	vencrypt_data->output_offset += copy_size;
 	vencrypt_data->output_size -= copy_size;
 
-	printk("VENCRYPT: %s.%d - %lu bytes read\n", __func__, __LINE__,
-	       copy_size);
-
 	return copy_size;
 }
 
@@ -355,13 +376,11 @@ static ssize_t vencrypt_read(struct file *fp, char __user *user_buffer,
 static ssize_t vencrypt_write(struct file *fp, const char *buffer, size_t size,
 			      loff_t *offset)
 {
-	size_t output_size;
+	ssize_t output_size;
 	size_t off;
 
 	vencrypt_device_data_t *vencrypt_data =
 		(vencrypt_device_data_t *)fp->private_data;
-	printk("VENCRYPT: %s.%d fp %p data %p\n", __func__, __LINE__, fp,
-	       vencrypt_data);
 
 	if (encrypt) {
 		if (vencrypt_data != vencrypt_data->pt) {
@@ -380,100 +399,48 @@ static ssize_t vencrypt_write(struct file *fp, const char *buffer, size_t size,
 	}
 
 	off = (offset != NULL) ? *offset : 0;
-	output_size = do_crypt(vencrypt_data, encrypt, buffer, size, off);
+	output_size = do_crypt(vencrypt_data, encrypt, buffer, NULL, size, off);
 
-	return size; // consumed bytes
+	if (output_size < 0) {
+		return output_size;
+	} else {
+		return size; // consumed bytes
+	}
 }
 
 static int vencrypt_release(struct inode *node, struct file *fp)
 {
 	vencrypt_device_data_t *vencrypt_data =
 		(vencrypt_device_data_t *)fp->private_data;
-	printk("VENCRYPT: %s ct %lu bytes pt %lu bytes\n", __func__,
-	       vencrypt_data->ct->output_size, vencrypt_data->pt->output_size);
 
 	// handle padding
 	if (encrypt) {
 		// add final padding and encrypt if needed
 		int padding = get_padding(vencrypt_data->remainder_size,
 					  VE_BLOCK_SIZE);
-		size_t output_size;
-		printk("VENCRYPT: %s final padding %d\n", __func__, padding);
+		ssize_t output_size;
 		if (padding) {
 			vencrypt_data_list_t *entry;
-			int ind;
 			// should always be 1 to 16 pad bytes
 			memset(&vencrypt_data->remainder
 					[vencrypt_data->remainder_size],
 			       padding, padding);
-			output_size = do_crypt(vencrypt_data, encrypt,
+			output_size = do_crypt(vencrypt_data, encrypt, NULL,
 					       vencrypt_data->remainder,
 					       VE_BLOCK_SIZE, 0);
+			if (output_size < 0) {
+				return output_size;
+			}
 			entry = list_last_entry(
 				&vencrypt_data->output_list.list,
 				struct vencrypt_data_list, list);
-			printk("VENCRYPT: %s.%d last entry data_size = %lu\n",
-			       __func__, __LINE__, entry->data_size);
 			entry = list_last_entry(
 				&vencrypt_data->pt->output_list.list,
 				struct vencrypt_data_list, list);
-			printk("VENCRYPT: %s.%d pt last entry data_size = %lu\n",
-			       __func__, __LINE__, entry->data_size);
 			entry = list_last_entry(
 				&vencrypt_data->ct->output_list.list,
 				struct vencrypt_data_list, list);
-			printk("VENCRYPT: %s.%d ct last entry data_size = %lu\n",
-			       __func__, __LINE__, entry->data_size);
-			printk("VENCRYPT: %s.%d ct[end] = 0x%02x <- 0x%02x\n",
-			       __func__, __LINE__,
-			       entry->data[entry->data_size - 1],
-			       vencrypt_data->remainder[15]);
 		}
-	} else {
-#if 0
-        // strip final padding for decode
-        vencrypt_data_list_t *entry;
-        printk("VENCRYPT: %s.%d\n", __func__, __LINE__);
-        entry = list_last_entry(&vencrypt_data->ct->output_list.list, struct vencrypt_data_list, list);
-        printk("VENCRYPT: %s.%d ct last entry data_size = %lu\n", __func__, __LINE__,
-                entry->data_size);
-        entry = list_last_entry(&vencrypt_data->pt->output_list.list, struct vencrypt_data_list, list);
-        printk("VENCRYPT: %s.%d pt last entry data_size = %lu\n", __func__, __LINE__,
-                entry->data_size);
-        if (entry != NULL) {
-            int padding;
-            printk("VENCRYPT: %s.%d pt last entry data_size = %lu\n", __func__, __LINE__,
-                    entry->data_size);
-            if (entry->data_size == 0) {
-                // empty entry!
-                printk("VENCRYPT: %s.%d empty final entry\n", __func__, __LINE__);
-            } else {
-                padding = entry->data[entry->data_size-1];
-                printk("VENCRYPT: %s.%d entry data_size %lu\n", __func__, __LINE__,
-                        entry->data_size);
-                if (padding > VE_BLOCK_SIZE) {
-                    pr_info("VENCRYPT: %s.%d invalid padding size %d\n", __func__, __LINE__, padding);
-                    return -EINVAL;
-                }
-                if (padding > entry->data_size) {
-                    pr_info("VENCRYPT: %s.%d invalid padding size %d > data size %lu\n",
-                            __func__, __LINE__, padding, entry->data_size);
-                    return -EINVAL;
-                }
-                printk("VENCRYPT: %s.%d\n", __func__, __LINE__);
-                entry->data_size -= padding;
-                if (entry->data_size == 0) {
-                    // nothing left
-                    printk("VENCRYPT: %s.%d\n", __func__, __LINE__);
-                    vfree(entry->data);
-                    printk("VENCRYPT: %s.%d\n", __func__, __LINE__);
-                    list_del(&entry->list);
-                    printk("VENCRYPT: %s.%d\n", __func__, __LINE__);
-                    vfree(entry);
-                }
-            }
-        }
-#endif
 	}
 	return 0;
 }
@@ -491,7 +458,6 @@ static int set_key(const char *key, unsigned char *dest, size_t *size)
 	size_t key_size = strlen(key) / 2;
 	int ind;
 	// check key is appropriately sized
-	// XXX fixed size key. 128?
 	if (((key_size * 2) != strlen(key)) ||
 	    (strlen(key) > (VE_MAX_KEY_SIZE * 2))) {
 		// bad / odd key size
@@ -504,7 +470,6 @@ static int set_key(const char *key, unsigned char *dest, size_t *size)
 		return -EAGAIN;
 	}
 
-	printk("VENCRYPT: %s.%d\n", __func__, __LINE__);
 	// convert key to binary
 	for (ind = 0; ind < key_size; ind++) {
 		char digits[3] = { key[ind * 2], key[ind * 2 + 1], 0 };
@@ -521,7 +486,7 @@ static int set_key(const char *key, unsigned char *dest, size_t *size)
 		dest[ind] = (unsigned char)data;
 	}
 	if (size) {
-		size = key_size;
+		*size = key_size;
 	}
 
 	return 0;
@@ -552,7 +517,6 @@ int vencrypt_init(void)
 		return -EAGAIN;
 	}
 
-	printk("VENCRYPT: %s encrypt=%u key=%s\n", __func__, encrypt, key);
 	retval = alloc_chrdev_region(&device_number, 0, VE_MAX_DEVICES,
 				     "vencrypt");
 	if (retval) {
@@ -582,8 +546,6 @@ int vencrypt_init(void)
 			pr_info("%s: Failed in adding cdev to subsystem retval:%d\n",
 				__func__, retval);
 		} else {
-			printk("%s: device_create[%d] drvptr = %p\n", __func__,
-			       ind, &devs[nodes[ind].minor]);
 			device_create(vencrypt_class, NULL, dev,
 				      &devs[nodes[ind].minor], "%s",
 				      nodes[ind].name);
@@ -603,7 +565,6 @@ void vencrypt_exit(void)
 	int ind;
 	int major = MAJOR(device_number);
 	dev_t dev;
-	printk("VENCRYPT: %s\n", __func__);
 	for (ind = 0; ind < (sizeof(nodes) / sizeof(nodes[0])); ind++) {
 		dev = MKDEV(major, nodes[ind].minor);
 		/* release devs[ind] fields */
