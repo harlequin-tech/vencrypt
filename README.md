@@ -12,6 +12,18 @@
 
 # testing
 make
+make -C /lib/modules/5.15.0-87-generic/build M=/home/darran/dev/vencrypt modules
+make[1]: Entering directory '/usr/src/linux-headers-5.15.0-87-generic'
+  CC [M]  /home/darran/dev/vencrypt/vencrypt_main.o
+  CC [M]  /home/darran/dev/vencrypt/aes/aes.o
+  LD [M]  /home/darran/dev/vencrypt/vencrypt.o
+  MODPOST /home/darran/dev/vencrypt/Module.symvers
+  CC [M]  /home/darran/dev/vencrypt/vencrypt.mod.o
+  LD [M]  /home/darran/dev/vencrypt/vencrypt.ko
+  BTF [M] /home/darran/dev/vencrypt/vencrypt.ko
+Skipping BTF generation for /home/darran/dev/vencrypt/vencrypt.ko due to unavailability of vmlinux
+make[1]: Leaving directory '/usr/src/linux-headers-5.15.0-87-generic'
+
 sudo insmod vencrypt.ko encrypt=1 key=0123456789ABCDEF0123456789ABCDEF
 sudo -i
 dd if=/dev/urandom of=rand.256 bs=128K count=2
