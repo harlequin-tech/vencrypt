@@ -63,7 +63,7 @@ static vencrypt_device_data_t devs[VE_MAX_DEVICES] = {
 
 static bool encrypt = true;
 module_param(encrypt, bool, 0660);
-MODULE_PARM_DESC(myshort, "1=encrypt, 0=decrypt");
+MODULE_PARM_DESC(bool, "1=encrypt, 0=decrypt");
 
 static char *key = "(no key)";
 module_param(key, charp, 0660);
